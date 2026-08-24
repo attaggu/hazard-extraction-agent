@@ -1,0 +1,6 @@
+openai>=1.30.0
+numpy
+python-dotenv
+streamlit
+rank_bm25
+kiwipiepy

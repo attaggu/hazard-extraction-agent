@@ -1,0 +1,7 @@
+.env
+venv/
+__pycache__/
+*.pyc
+data/index.npz
+data/bm25_corpus.json
+.DS_Store
