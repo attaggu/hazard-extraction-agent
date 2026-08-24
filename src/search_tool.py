@@ -13,6 +13,7 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 INDEX_PATH = BASE_DIR / "data" / "index.npz"
 BM25_CORPUS_PATH = BASE_DIR / "data" / "bm25_corpus.json"
+SEVERITY_PATH = BASE_DIR / "data" / "severity.json"
 EMBEDDING_MODEL = "text-embedding-3-small"
 HYBRID_ALPHA = 0.5
 
@@ -35,10 +36,15 @@ def load_index():
         data = np.load(INDEX_PATH, allow_pickle=True)
         with open(BM25_CORPUS_PATH, encoding="utf-8") as f:
             corpus_tokens = json.load(f)
+        severity = {}
+        if SEVERITY_PATH.exists():
+            with open(SEVERITY_PATH, encoding="utf-8") as f:
+                severity = json.load(f)
         _cache["data"] = (
             data["vectors"],
             [json.loads(d) for d in data["docs"]],
             BM25Okapi(corpus_tokens),
+            severity,
         )
     return _cache["data"]
 
@@ -58,7 +64,7 @@ def normalize(scores: np.ndarray) -> np.ndarray:
 
 def search_accident_cases(query: str, top_k: int = 3) -> list[dict]:
     """과거 건설안전 사고사례 DB에서 질의와 관련된 사례를 검색합니다 (벡터+BM25 하이브리드)."""
-    vectors, docs, bm25 = load_index()
+    vectors, docs, bm25, severity = load_index()
 
     response = client.embeddings.create(model=EMBEDDING_MODEL, input=[query])
     query_vec = np.array(response.data[0].embedding, dtype=np.float32)
@@ -70,18 +76,25 @@ def search_accident_cases(query: str, top_k: int = 3) -> list[dict]:
     )
     top_indices = np.argsort(combined)[::-1][:top_k]
 
-    return [
-        {
-            "id": docs[i]["id"],
-            "공정": docs[i]["공정"],
-            "사고유형": docs[i]["사고유형"],
-            "내용": docs[i]["내용"],
-            "원인": docs[i]["원인"],
-            "재발방지대책": docs[i]["재발방지대책"],
-            "점수": round(float(combined[i]), 3),
-        }
-        for i in top_indices
-    ]
+    results = []
+    for i in top_indices:
+        doc_id = docs[i]["id"]
+        sev = severity.get(str(doc_id), {})
+        results.append(
+            {
+                "id": doc_id,
+                "공정": docs[i]["공정"],
+                "사고유형": docs[i]["사고유형"],
+                "내용": docs[i]["내용"],
+                "원인": docs[i]["원인"],
+                "재발방지대책": docs[i]["재발방지대책"],
+                "점수": round(float(combined[i]), 3),
+                "사망자수": sev.get("사망자", "미상"),
+                "부상자수": sev.get("부상자", "미상"),
+                "통계기반등급": sev.get("통계기반등급", "미상"),
+            }
+        )
+    return results
 
 
 # OpenAI function-calling용 도구 스펙
