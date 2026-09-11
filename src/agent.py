@@ -1,6 +1,7 @@
 import json
 import os
 
+import jsonschema
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -10,6 +11,7 @@ load_dotenv()
 
 CHAT_MODEL = "gpt-4o-mini"
 MAX_TURNS = 10
+MAX_QUERY_LEN = 200
 
 client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
@@ -65,6 +67,31 @@ SYSTEM_PROMPT = """당신은 건설현장 설계문서(시방서)를 검토해 �
 """
 
 
+def validate_tool_call(tool_call, schema: dict = TOOL_SCHEMA):
+    """LLM이 반환한 tool call 인자를 실행 전에 서버 쪽에서 검증한다.
+    (1) JSON 파싱 가능한가, (2) 선언한 스키마(타입/필수필드)를 지키는가,
+    (3) 그 외 최소한의 상식적 제약(빈 문자열, 과도한 길이)을 지키는가.
+    문제가 있으면 (None, 에러메시지)를 반환하고, 정상이면 (args, None)을 반환한다."""
+    raw = tool_call.function.arguments
+    try:
+        args = json.loads(raw)
+    except json.JSONDecodeError as e:
+        return None, f"인자를 JSON으로 파싱할 수 없습니다: {e}"
+
+    try:
+        jsonschema.validate(instance=args, schema=schema["function"]["parameters"])
+    except jsonschema.ValidationError as e:
+        return None, f"인자가 도구 스키마와 맞지 않습니다: {e.message}"
+
+    query = args.get("query", "")
+    if not isinstance(query, str) or not query.strip():
+        return None, "query는 비어있지 않은 문자열이어야 합니다."
+    if len(query) > MAX_QUERY_LEN:
+        return None, f"query가 너무 깁니다 ({len(query)}자, 최대 {MAX_QUERY_LEN}자)."
+
+    return args, None
+
+
 def run_agent(design_doc_text: str, on_tool_call=None):
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -92,9 +119,23 @@ def run_agent(design_doc_text: str, on_tool_call=None):
         messages.append(message.model_dump(exclude_none=True))
 
         for tool_call in message.tool_calls:
-            args = json.loads(tool_call.function.arguments)
-            query = args["query"]
+            args, error = validate_tool_call(tool_call)
 
+            if error:
+                # 실행하지 않고, 에러를 LLM에게 되돌려줘서 스스로 인자를 고쳐 재시도하게 함
+                tool_call_log.append({"query": None, "error": error, "results": []})
+                if on_tool_call:
+                    on_tool_call(f"(검증 실패) {error}", [])
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps({"error": error}, ensure_ascii=False),
+                    }
+                )
+                continue
+
+            query = args["query"]
             results = search_accident_cases(query)
             tool_call_log.append({"query": query, "results": results})
             if on_tool_call:

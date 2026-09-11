@@ -7,3 +7,4 @@ rank_bm25
 kiwipiepy
 pypdf
 openpyxl
+jsonschema
